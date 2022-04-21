@@ -57,6 +57,12 @@ struct PointLight
     float intensity;
 };
 
+// Plane sdf, n must be normalized
+float sdfPlane(vec3 position, vec3 normal, float height)
+{
+  return dot(position, normal) + height;
+}
+
 // Sphere sdf
 float sdfSphere(vec3 position, vec3 center, float radius)
 {
@@ -82,13 +88,44 @@ float opIntersection(float d1, float d2) { return max(d1, d2); }
 float opRep(vec3 p, vec3 c)
 {
     vec3 q = mod(p + 0.5 * c, c) - 0.5 * c;
-    return sdfBox(q, vec3(0, .5, 0), vec3(0.8, 1, 0.8));
+    return sdfBox(q, vec3(0, sin(time + q.x * 0.5) * .1, 0), vec3(0.8, 1, 0.8));
 }
 
 float smin( float a, float b, float k )
 {
     float h = max(k - abs(a - b), 0.0 ) / k;
     return min(a, b) - h * h * k * (1.0 / 4.0);
+}
+
+float sdfScene(vec3 position)
+{
+    //Sphere
+    float sphere = sdfSphere(position, vec3(0, sin(time) + 2.5, 0), 1);
+
+    // Distortion
+    //float d = sin(5.0 * point.x) * sin(5.0 * point.y) * sin(5.0 * point.z) * 0.25;
+
+    float plane = sdfPlane(position, vec3(0, 1, 0), 0);
+
+    float boxes = opRep(position, vec3(10, 10, 10));
+
+    float test = smin(sphere, plane, 2);
+
+    return boxes;
+}
+
+// Find slope at position
+vec3 calculateNormal(vec3 position) 
+{
+    vec2 smallStep = vec2(0.001, 0.0);
+	float distanceToScene = sdfScene(position);
+    vec3 normal = distanceToScene - vec3(
+        sdfScene(position - smallStep.xyy),
+        sdfScene(position - smallStep.yxy),
+        sdfScene(position - smallStep.yyx)
+    );  
+
+    return normalize(normal);
 }
 
 // Compute soft shadows for a given light, with a single
@@ -113,36 +150,6 @@ float smin( float a, float b, float k )
 //    return max( res, 0.0 );
 //}
 
-float sdfScene(vec3 position)
-{
-    //Sphere
-    float sphere = sdfSphere(position, vec3(0, sin(time) + 2.5, 0), 1);
-
-    // Distortion
-    //float d = sin(5.0 * point.x) * sin(5.0 * point.y) * sin(5.0 * point.z) * 0.25;
-
-    float plane = position.y;
-
-    float boxes = opRep(position, vec3(10, 10, 10));
-
-    float test = smin(sphere, plane, 2);
-
-    return boxes;
-}
-
-// Find slope at position
-vec3 calculateNormal(vec3 position) 
-{
-    vec2 smallStep = vec2(0.001, 0.0);
-	float distanceToScene = sdfScene(position);
-    vec3 normal = distanceToScene - vec3(
-        sdfScene(position - smallStep.xyy),
-        sdfScene(position - smallStep.yxy),
-        sdfScene(position - smallStep.yyx)
-    );  
-
-    return normalize(normal);
-}
 
 Hit rayMarch(vec3 origin, vec3 direction) 
 {
@@ -167,7 +174,7 @@ Hit rayMarch(vec3 origin, vec3 direction)
             ns.dist = distanceToScene;
         }
         
-        if((distanceToScene < MIN_DISTANCE) || (totalDistance >= MAX_DISTANCE)) 
+        if((abs(distanceToScene) < MIN_DISTANCE) || (totalDistance > MAX_DISTANCE)) 
         {
             break;
         }
@@ -197,12 +204,26 @@ float calcAO(vec3 p, vec3 n)
     return clamp(1.0 - occ, 0.0, 1.0);
 }
 
+
 vec3 calculatePointLight(vec3 position, vec3 normal, PointLight light)
 {  
     vec3 lightDirection = normalize(light.position - position);
 
     // Diffuse
     float diffuse = max(dot(normal, lightDirection), 0.0);
+
+    // Shadows
+    if(areShadowsOn)
+    {
+        //Compare raymarch distance to light with distance to light
+        //Need to move the position with the normal so raymarching doesn't stop immediately
+        Hit hit = rayMarch(position + normal * SHADOW_JUMP_DISTANCE, lightDirection);
+    
+        if(hit.surface.dist < length(light.position - hit.surface.position)) // this might not be set
+        {
+            diffuse *= 0;//.1; // reduce brightness to 10% in shadow
+        }
+    }
 
     // Specular
     vec3 reflectDirection = reflect(-lightDirection, normal);
@@ -222,7 +243,7 @@ vec3 calculatePointLight(vec3 position, vec3 normal, PointLight light)
 vec3 calculateDirectionalLight(vec3 position, vec3 normal, DirectionalLight light)
 {
     // Ambient
-    float ambient = 0.15;//calcAO(position, normal);
+    //float ambient = 0.15;//calcAO(position, normal);
 
     vec3 lightDirection = normalize(-light.direction);
 
@@ -255,7 +276,8 @@ vec3 calculateDirectionalLight(vec3 position, vec3 normal, DirectionalLight ligh
         specular = pow(max(0.0, dot(viewDirection, reflectDirection)), specularPower);
     }
 
-    return (ambient + diffuse + specular) * light.intensity * light.color; 
+    //return (ambient + diffuse + specular) * light.intensity * light.color; 
+    return (diffuse + specular) * light.intensity * light.color; 
 }
 
 vec3 shade(Surface surface) 
@@ -271,7 +293,7 @@ vec3 shade(Surface surface)
 
     DirectionalLight directionalLight;
     directionalLight.direction = vec3(0.0, -1.0, 1.0);
-    directionalLight.intensity = 0.8;
+    directionalLight.intensity = 0.3;
     directionalLight.color = vec3(0.76, 0.77, 0.8); //moon color
 
     PointLight pointLight;
@@ -325,7 +347,7 @@ void main()
     float ea = 1.0; 
     float emissive = pow(near.dist + 2., -2.);
     color += emissive * emissiveColor;
-    
+
     // no hit or too far
     if(surface.dist >= MAX_DISTANCE) 
     {
