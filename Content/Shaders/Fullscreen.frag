@@ -1,12 +1,8 @@
+// Math, concepts, and inspiration from Inigo Quilez: https://iquilezles.org/
 #version 460 core
 
-#define EPS 0.0001
-#define PI 3.14159265359
-#define FLOAT_MAX 3.402823466e+38
-#define FLOAT_MIN 1.175494351e-38
-
+// IO
 out vec4 FragColor;
-
 in vec2 texCoords; 
 
 // General uniforms
@@ -20,27 +16,39 @@ uniform vec3 cameraRight;
 uniform vec3 cameraUp;
 uniform float fov = 45.0;
 
-uniform bool areShadowsOn = false;
+// Shadow control
+uniform bool areShadowsOn = true;
 
-// raymarch settings
+// Raymarch settings
 const int MAX_STEPS = 100;
 const float MAX_DISTANCE = 100;
 const float MIN_DISTANCE = 0.01f;
-const float SHADOW_JUMP_DISTANCE = 0.02f; // make this bigger than above
+const float SHADOW_JUMP_DISTANCE = 0.02f; // make this bigger than above, used to shoot shadow ray so that it does not stop on first iteration
 
-struct Surface 
+// Material IDs
+const int MAT_DEFAULT = 0;
+const int MAT_REFLECTIVE = 1;
+const int MAT_REFRACTIVE = 2;
+
+struct Material
 {
-    float dist;
-    vec3 position;
-    vec3 baseColor;
-    vec3 normal;
-    vec3 emissiveColor;
+    int id;
+    vec3 color;
+    float specular;
+};
+
+struct SceneData
+{
+    float dist; // distance to closest object in scene
+    Material material; // color of closest object
 };
 
 struct Hit 
 {
-    Surface surface;
-    Surface near;
+    float dist;
+    float nearDist;
+    vec3 position;
+    Material material;
 };
 
 struct DirectionalLight 
@@ -57,19 +65,17 @@ struct PointLight
     float intensity;
 };
 
-// Plane sdf, n must be normalized
+// SDFS
 float sdfPlane(vec3 position, vec3 normal, float height)
 {
   return dot(position, normal) + height;
 }
 
-// Sphere sdf
 float sdfSphere(vec3 position, vec3 center, float radius)
 {
     return length(center - position) - radius;
 }
 
-// Box sdf
 float sdfBox(vec3 position, vec3 center, vec3 bounds)
 {
   vec3 offset = abs(position - center) - bounds;
@@ -85,170 +91,110 @@ float opSubtraction(float d1, float d2) { return max(-d1, d2); }
 
 float opIntersection(float d1, float d2) { return max(d1, d2); }
 
-float opRep(vec3 p, vec3 c)
+float opRepSpheres(vec3 p, vec3 c)
 {
     vec3 q = mod(p + 0.5 * c, c) - 0.5 * c;
-    return sdfBox(q, vec3(0, sin(time + q.x * 0.5) * .1, 0), vec3(0.8, 1, 0.8));
+    return sdfSphere(q, vec3(0, sin(time) + 2.5, 0), 1);
 }
 
-float smin( float a, float b, float k )
+// X is distance, Y is blend amount
+vec2 smoothMinimum(float a, float b, float k)
 {
-    float h = max(k - abs(a - b), 0.0 ) / k;
-    return min(a, b) - h * h * k * (1.0 / 4.0);
+    float f1 = exp2(-k * a);
+    float f2 = exp2(-k * b);
+    return vec2(-log2(f1 + f2) / k, f2);
 }
 
-float sdfScene(vec3 position)
+// This function gets distance to surface and that surfaces material
+SceneData getSceneData(vec3 position)
 {
-    //Sphere
-    float sphere = sdfSphere(position, vec3(0, sin(time) + 2.5, 0), 1);
+    SceneData sceneData;
 
-    // Distortion
-    //float d = sin(5.0 * point.x) * sin(5.0 * point.y) * sin(5.0 * point.z) * 0.25;
+    vec3 color = vec3(0.0);
 
     float plane = sdfPlane(position, vec3(0, 1, 0), 0);
 
-    float boxes = opRep(position, vec3(10, 10, 10));
+    float sphere = sdfSphere(position, vec3(-8, sin(time) + 2.5, 0), 1);
 
-    float test = smin(sphere, plane, 2);
+    float sphere2 = sdfSphere(position, vec3(-4, sin(time) + 2.5, 0), 1);
 
-    return boxes;
+    float sphere3 = sdfSphere(position, vec3(0, sin(time) + 2.5, 0), 1);
+
+    float allSpheres = min(sphere, min(sphere2, sphere3));;
+
+    vec3 planeColor = vec3(1.0);
+    vec3 sphereColor;
+
+    if(allSpheres == sphere) 
+    {
+        sphereColor = vec3(1, 1, 1);
+        sceneData.material.id = MAT_DEFAULT;
+    }
+    else if(allSpheres == sphere2) 
+    {
+        sphereColor = vec3(1, .5, 0);
+        sceneData.material.id = MAT_REFLECTIVE;
+    }
+    else if(allSpheres == sphere3) 
+    {
+        sphereColor = vec3(.5, 1, 0);
+        sceneData.material.id = MAT_REFRACTIVE;
+    }
+
+    vec2 smoothMinimum = smoothMinimum(plane, allSpheres, 2);
+    
+    //Combine distances
+    sceneData.dist = smoothMinimum.x;
+
+    sceneData.material.color = mix(planeColor, sphereColor, smoothMinimum.y);
+    
+    return sceneData;
 }
 
-// Find slope at position
-vec3 calculateNormal(vec3 position) 
-{
-    vec2 smallStep = vec2(0.001, 0.0);
-	float distanceToScene = sdfScene(position);
-    vec3 normal = distanceToScene - vec3(
-        sdfScene(position - smallStep.xyy),
-        sdfScene(position - smallStep.yxy),
-        sdfScene(position - smallStep.yyx)
-    );  
-
-    return normalize(normal);
-}
-
-// Compute soft shadows for a given light, with a single
-// ray insead of using montecarlo integration or shadowmap
-// blurring. More info here:
-//
-// https://iquilezles.org/articles/rmshadows
-//
-//float calcSoftshadow(in vec3 ro, in vec3 rd, in float mint, in float tmax, in float time, float k )
-//{
-//    // raymarch and track penumbra    
-//    float res = 1.0;
-//    float t = mint;
-//    for( int i=0; i<128; i++ )
-//    {
-//        float kk; vec3 kk2;
-//		float h = sdfScene(ro + rd * t, time, kk, kk2 ).x;
-//        res = min( res, k*h/t );
-//        t += clamp( h, 0.005, 0.1 );
-//        if( res<0.002 || t>tmax ) break;
-//    }
-//    return max( res, 0.0 );
-//}
-
-
+// Ray march from orgin in ray direction
 Hit rayMarch(vec3 origin, vec3 direction) 
 {
-    Surface cs;  // current surface
-    cs.dist = -1.0;
-    
-    Surface ns; // near surface
-    ns.dist = FLOAT_MAX;
-    
-    Hit hit;
+    // Struct to store data
+    Hit hit; 
+    hit.nearDist = 3.402823466e+38; // max float
 
-    float distanceToScene = 0.0;
+    SceneData sceneData;
     float totalDistance = MIN_DISTANCE;
 
     for(int i = 0; i < MAX_STEPS; i++) 
     {
-        distanceToScene = sdfScene(origin + direction * totalDistance);
+        sceneData = getSceneData(origin + direction * totalDistance);
       
         // cache near distance
-        if(distanceToScene < ns.dist) 
+        if(sceneData.dist < hit.nearDist) 
         {
-            ns.dist = distanceToScene;
+            hit.nearDist = sceneData.dist;
         }
         
-        if((abs(distanceToScene) < MIN_DISTANCE) || (totalDistance > MAX_DISTANCE)) 
+        totalDistance += sceneData.dist;
+
+        if((abs(sceneData.dist) < MIN_DISTANCE) || (totalDistance > MAX_DISTANCE)) 
         {
             break;
         }
-        
-        totalDistance += distanceToScene;
-        cs.dist = totalDistance;
     }
-      
-    cs.dist = totalDistance;
-    hit.surface = cs;
-    hit.near = ns;
+     
+    // cache distance traveled and position
+    hit.dist = totalDistance;
+    hit.position = origin + direction * totalDistance;
+    hit.material = sceneData.material;          
 
     return hit;
 }
 
-float calcAO(vec3 p, vec3 n) 
-{
-    float k = 1.0;
-    float occ = 0.0;
-    for(int i = 0; i < 5; i++) 
-    {
-        float len = .15 * (float(i) + 1.0);
-        float distance = sdfScene(n * len + p);
-        occ += (len - distance) * k;
-        k *= 0.5;
-    }
-    return clamp(1.0 - occ, 0.0, 1.0);
-}
-
-
-vec3 calculatePointLight(vec3 position, vec3 normal, PointLight light)
-{  
-    vec3 lightDirection = normalize(light.position - position);
-
-    // Diffuse
-    float diffuse = max(dot(normal, lightDirection), 0.0);
-
-    // Shadows
-    if(areShadowsOn)
-    {
-        //Compare raymarch distance to light with distance to light
-        //Need to move the position with the normal so raymarching doesn't stop immediately
-        Hit hit = rayMarch(position + normal * SHADOW_JUMP_DISTANCE, lightDirection);
-    
-        if(hit.surface.dist < length(light.position - hit.surface.position)) // this might not be set
-        {
-            diffuse *= 0;//.1; // reduce brightness to 10% in shadow
-        }
-    }
-
-    // Specular
-    vec3 reflectDirection = reflect(-lightDirection, normal);
-
-    float specular = 0.0;
-    float specularPower = 32.0;
-
-    if(diffuse > 0.0) 
-    {
-        specular = max(0.0, dot(reflectDirection, normalize(cameraPosition - normal)));
-        specular = pow(specular, specularPower) * light.intensity;
-    }
-
-    return (diffuse + specular) * light.intensity * light.color; 
-}
-
-vec3 calculateDirectionalLight(vec3 position, vec3 normal, DirectionalLight light)
+// Calculate a light source, directional only for now but should work for point lights
+vec3 calculateLight(vec3 position, vec3 normal, vec3 lightDirection, vec3 lightColor, float lightIntensity)
 {
     // Ambient
-    //float ambient = 0.15;//calcAO(position, normal);
-
-    vec3 lightDirection = normalize(-light.direction);
+    float ambient = 0.15;//calcAO(position, normal);
 
     // Diffuse
-    float diffuse = max(dot(normal, lightDirection), 0.0);
+    float diffuse = max(dot(normal, lightDirection), 0);
 
     // Shadows
     if(areShadowsOn)
@@ -257,7 +203,7 @@ vec3 calculateDirectionalLight(vec3 position, vec3 normal, DirectionalLight ligh
         //Need to move the position with the normal so raymarching doesn't stop immediately
         Hit hit = rayMarch(position + normal * SHADOW_JUMP_DISTANCE, lightDirection);
     
-        if(hit.surface.dist < MAX_DISTANCE)
+        if(hit.dist < MAX_DISTANCE)
         {
             diffuse *= 0;//.1; // reduce brightness to 10% in shadow
         }
@@ -270,26 +216,39 @@ vec3 calculateDirectionalLight(vec3 position, vec3 normal, DirectionalLight ligh
 
     if(diffuse > 0.0) 
     {
-        float specularPower = 64.0;
+        float specularPower = 32.0;
 
-        vec3 viewDirection = normalize(cameraPosition - position);
+        vec3 viewDirection = normalize(position - cameraPosition);
         specular = pow(max(0.0, dot(viewDirection, reflectDirection)), specularPower);
     }
 
     //return (ambient + diffuse + specular) * light.intensity * light.color; 
-    return (diffuse + specular) * light.intensity * light.color; 
+    return (diffuse + specular) * lightIntensity * lightColor; 
 }
 
-vec3 shade(Surface surface) 
+// Find slope at position
+vec3 calculateNormal(vec3 position) 
 {
-    vec3 position = surface.position;
+    vec2 smallStep = vec2(0.001, 0.0);
+	float distanceToScene = getSceneData(position).dist;
+    vec3 normal = distanceToScene - vec3(
+        getSceneData(position - smallStep.xyy).dist,
+        getSceneData(position - smallStep.yxy).dist,
+        getSceneData(position - smallStep.yyx).dist
+    );  
 
-    vec3 color = vec3(0.0);
-    vec3 sceneColor = vec3(0.0);
-    vec3 normal = calculateNormal(position);
+    return normalize(normal);
+}
 
-    vec3 objColor = vec3(1, 0.96, .72);
-    vec3 specularColor = vec3(1., .6, .6);
+// Shade pixel
+vec3 shade(vec3 rayOrigin, vec3 rayDirection) 
+{
+    // Raymarch
+    Hit hit = rayMarch(cameraPosition, rayDirection);
+
+    vec3 normal = calculateNormal(hit.position);
+
+    vec3 reflectDirection = reflect(rayDirection, normal);
 
     DirectionalLight directionalLight;
     directionalLight.direction = vec3(0.0, -1.0, 1.0);
@@ -301,21 +260,36 @@ vec3 shade(Surface surface)
     pointLight.intensity = 0.8;
     pointLight.color = vec3(0.8, 0.5, 0.5);
 
-    
-    // directional light
-    color += calculateDirectionalLight(position, normal, directionalLight);
+    vec3 directionalLightDirection = normalize(-directionalLight.direction);
+    //vec3 pointLightDirection = normalize(pointLight.position - position);
 
-    // ambient
-    //vec3 ambient = ambientLight.color * ambientLight.intensity * objColor;
-    //float ao = calcAO(position, normal);
+    vec3 color;
+    vec3 bgColor = vec3(0.19, 0.23, 0.38);
+    //vec3 bgColor = vec3( 0.1+0.05*mod(floor(texCoords.x*4.0)+floor(texCoords.y*4.0),2.0) ); // checkerboard
 
+    // Check if hit
+    if(hit.dist < MAX_DISTANCE) 
+    {
+        // Hit
+        // Set color from hit
+        color = hit.material.color;
 
-    //color += objColor * diffuse + specular + ambient * ao;
-    
+        // Apply lights
+        color *= calculateLight(hit.position, normal, directionalLightDirection, directionalLight.color, directionalLight.intensity);
+
+        // Blend object with background with fresnel
+        float fresnel = pow(1.0 + dot(rayDirection, normal), 3.0);
+
+        color = mix(color, bgColor, fresnel);
+    }
+    else
+    {
+        // No hit
+        color = bgColor;
+    }
+
     return color;
 }
-
-
 
 void main()
 { 
@@ -332,33 +306,8 @@ void main()
     float fPersp = 2.0;
     vec3 rayDirection = normalize(offsets.x * cameraRight + offsets.y * cameraUp + cameraForward * fPersp);
 
-    // Raymarch
-    Hit hit = rayMarch(cameraPosition, rayDirection);
-    Surface surface = hit.surface;
-    Surface near = hit.near;
-
-    surface.position = cameraPosition + rayDirection * surface.dist;
-      
     // color
-    vec3 color = vec3(0.0);
-      
-    // emissive
-    vec3 emissiveColor = vec3(1, 0.96, .72);
-    float ea = 1.0; 
-    float emissive = pow(near.dist + 2., -2.);
-    color += emissive * emissiveColor;
-
-    // no hit or too far
-    if(surface.dist >= MAX_DISTANCE) 
-    {
-        vec3 bgColor = vec3(0.1);
-        FragColor.rgb = color + bgColor;
-        return;
-    }
-
-    //color += emissiveColor;
-    color += shade(surface);
-
+    vec3 color = shade(cameraPosition, rayDirection);
 
     // Gamma correction
 	color = pow(color, vec3(1.0 / 2.2));

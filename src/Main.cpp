@@ -17,12 +17,12 @@ glm::vec2 resolution = glm::vec2(2560, 1440);
 // Camera uniforms
 glm::vec3 cameraPosition = glm::vec3(0.0f, 2.0f, -10.0f);
 glm::vec3 cameraForward = glm::vec3(0.0f, 0.0f, 1.0f);
-glm::vec3 cameraRight = glm::vec3(1.0f, 0.0f, 0.0f);
+glm::vec3 cameraRight = glm::vec3(-1.0f, 0.0f, 0.0f);
 glm::vec3 cameraUp = glm::vec3(0.0f, 1.0f, 0.0f);
 float cameraFOV = 90.0f;
 
 // Other camera vars
-float cameraYaw = 90.0f;
+float cameraYaw = 0.0f;
 float cameraPitch = 0.0f;
 float cameraSpeed = 10.0f;
 float cameraSensitivity = 10.0f;
@@ -306,7 +306,7 @@ void ProcessInput(GLFWwindow* window, float deltaTime)
 			double mouseY;
 			glfwGetCursorPos(window, &mouseX, &mouseY);
 
-			float xoffset = (mouseX - savedMouseX) * cameraSensitivity * deltaTime;
+			float xoffset = (savedMouseX - mouseX) * cameraSensitivity * deltaTime;
 			float yoffset = (savedMouseY - mouseY) * cameraSensitivity * deltaTime;
 
 			cameraYaw += xoffset;
@@ -324,9 +324,9 @@ void ProcessInput(GLFWwindow* window, float deltaTime)
 
 			// Calculate new forward vector
 			glm::vec3 forward;
-			forward.x = cos(glm::radians(cameraYaw)) * cos(glm::radians(cameraPitch));
+			forward.x = sin(glm::radians(cameraYaw)) * cos(glm::radians(cameraPitch));
 			forward.y = sin(glm::radians(cameraPitch));
-			forward.z = sin(glm::radians(cameraYaw)) * cos(glm::radians(cameraPitch));
+			forward.z = cos(glm::radians(cameraYaw))* cos(glm::radians(cameraPitch));
 			cameraForward = glm::normalize(forward);
 
 			// Re-calculate the Right and Up vector
