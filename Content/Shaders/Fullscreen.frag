@@ -132,12 +132,12 @@ SceneData getSceneData(vec3 position)
     }
     else if(allSpheres == sphere2) 
     {
-        sphereColor = vec3(1, .5, 0);
+        sphereColor = vec3(0, 0, 1);
         sceneData.material.id = MAT_REFLECTIVE;
     }
     else if(allSpheres == sphere3) 
     {
-        sphereColor = vec3(.5, 1, 0);
+        sphereColor = vec3(0, 1, 0);
         sceneData.material.id = MAT_REFRACTIVE;
     }
 
@@ -240,9 +240,24 @@ vec3 calculateNormal(vec3 position)
     return normalize(normal);
 }
 
-// Shade pixel
-vec3 shade(vec3 rayOrigin, vec3 rayDirection) 
-{
+void main()
+{ 
+    float aspect = resolution.x / resolution.y;
+    float fov2 = radians(fov) / 2;
+
+    // convert coords from [0,1] to [-1,1]
+    vec2 uv = (texCoords - 0.5) * 2.0;
+    uv.x *= aspect;
+
+    // contribute up and right vectors
+    vec2 offsets = uv * tan(fov2);
+
+    float fPersp = 2.0;
+    vec3 rayDirection = normalize(offsets.x * cameraRight + offsets.y * cameraUp + cameraForward * fPersp);
+
+    // color
+    vec3 color;
+
     // Raymarch
     Hit hit = rayMarch(cameraPosition, rayDirection);
 
@@ -263,7 +278,6 @@ vec3 shade(vec3 rayOrigin, vec3 rayDirection)
     vec3 directionalLightDirection = normalize(-directionalLight.direction);
     //vec3 pointLightDirection = normalize(pointLight.position - position);
 
-    vec3 color;
     vec3 bgColor = vec3(0.19, 0.23, 0.38);
     //vec3 bgColor = vec3( 0.1+0.05*mod(floor(texCoords.x*4.0)+floor(texCoords.y*4.0),2.0) ); // checkerboard
 
@@ -287,27 +301,6 @@ vec3 shade(vec3 rayOrigin, vec3 rayDirection)
         // No hit
         color = bgColor;
     }
-
-    return color;
-}
-
-void main()
-{ 
-    float aspect = resolution.x / resolution.y;
-    float fov2 = radians(fov) / 2;
-
-    // convert coords from [0,1] to [-1,1]
-    vec2 uv = (texCoords - 0.5) * 2.0;
-    uv.x *= aspect;
-
-    // contribute up and right vectors
-    vec2 offsets = uv * tan(fov2);
-
-    float fPersp = 2.0;
-    vec3 rayDirection = normalize(offsets.x * cameraRight + offsets.y * cameraUp + cameraForward * fPersp);
-
-    // color
-    vec3 color = shade(cameraPosition, rayDirection);
 
     // Gamma correction
 	color = pow(color, vec3(1.0 / 2.2));
